@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Strategy Lab</title>
+  <meta name="description" content="Educational demo of trading strategy signals on historical playback and synthetic candles.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="disclaimer" role="note">
+    <strong>Educational demo only.</strong> Nothing here is investment advice or a recommendation to trade.
+    Synthetic candles are computer-generated and their results are simulated, not real market performance.
+    Historical results do not predict future results.
+  </div>
+
+  <header class="top">
+    <div class="brand">Strategy Lab <span>learn how our strategies read the chart</span></div>
+  </header>
+
+  <main class="layout">
+    <section class="workspace">
+      <div class="toolbar">
+        <div class="field">
+          <span class="label">Data</span>
+          <div class="seg" id="sourceSeg">
+            <button data-value="historical">Historical</button>
+            <button data-value="synthetic">Synthetic</button>
+          </div>
+        </div>
+        <div class="field" id="datasetField">
+          <label class="label" for="dataset">Dataset</label>
+          <select id="dataset"></select>
+        </div>
+        <div class="field">
+          <label class="label" for="strategy">Strategy</label>
+          <select id="strategy"></select>
+        </div>
+        <div class="field">
+          <span class="label">Mode</span>
+          <div class="seg" id="modeSeg">
+            <button data-value="full">Full chart</button>
+            <button data-value="playback">Playback</button>
+            <button data-value="live" title="Synthetic data only">Live</button>
+          </div>
+        </div>
+      </div>
+
+      <details class="synthetic-settings" id="syntheticSettings" open>
+        <summary>Synthetic market settings</summary>
+        <div class="settings-grid">
+          <label>Market condition
+            <select id="condition">
+              <option value="auto">Mixed (switches regime)</option>
+              <option value="trend-up">Trending up</option>
+              <option value="trend-down">Trending down</option>
+              <option value="range">Ranging</option>
+              <option value="volatile">Volatile</option>
+            </select>
+          </label>
+          <label>Volatility
+            <select id="volatility">
+              <option value="low">Low</option>
+              <option value="normal" selected>Normal</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+          <label>Seed <input id="seed" type="number" value="42" min="0"></label>
+          <label>Candles <input id="bars" type="number" value="1500" min="100" max="3000" step="100"></label>
+          <label class="check"><input id="steer" type="checkbox" checked> Steer outcomes to a target win rate</label>
+          <label>Target win rate <span id="targetOut">55%</span>
+            <input id="target" type="range" min="30" max="70" value="55">
+          </label>
+          <button id="regenerate" class="primary">Generate</button>
+        </div>
+        <p class="hint">With steering on, the generator decides each trade's outcome in advance and nudges prices toward it, so the win rate you see is the setting, not a test of the strategy. Turn steering off to see how a strategy behaves in each market condition.</p>
+      </details>
+
+      <div class="chart-wrap">
+        <div id="chart" class="chart"></div>
+        <div class="sim-watermark" id="simWatermark" hidden>SIMULATED</div>
+        <div class="sim-badge" id="simBadge" hidden>Simulated data · not real market prices</div>
+        <div class="chart-empty" id="chartEmpty" hidden></div>
+        <div class="legend" id="legend"></div>
+      </div>
+
+      <div class="playback" id="playbackBar" hidden>
+        <button id="pbStart" title="Back to start">⏮</button>
+        <button id="pbBack" title="Previous candle">◀</button>
+        <button id="pbPlay" class="primary" title="Play / pause">▶</button>
+        <button id="pbFwd" title="Next candle">▶|</button>
+        <input id="pbSlider" type="range" min="0" value="0" aria-label="Playback position">
+        <select id="pbSpeed" aria-label="Playback speed">
+          <option value="1000">1 candle/s</option>
+          <option value="400" selected>2.5 candles/s</option>
+          <option value="150">7 candles/s</option>
+          <option value="50">20 candles/s</option>
+        </select>
+        <span class="pb-pos" id="pbPos"></span>
+      </div>
+
+      <div class="livebar" id="liveBar" hidden>
+        <span class="dot"></span> <span id="liveStatus">Live synthetic market</span>
+        <select id="liveSpeed" aria-label="Live speed">
+          <option value="2000">1 candle / 2 s</option>
+          <option value="1000" selected>1 candle / s</option>
+          <option value="400">2.5 candles / s</option>
+        </select>
+        <button id="livePause">Pause</button>
+      </div>
+
+      <section class="ticket" id="ticket">
+        <div class="ticket-head">
+          <h2>Practice trade</h2>
+          <span class="tag" id="ticketTag"></span>
+        </div>
+        <p class="muted small" id="ticketOff">Switch to <strong>Playback</strong> or <strong>Live</strong> to take practice trades. In Playback the candles stay paused while you decide.</p>
+        <div id="ticketOn">
+          <div class="ticket-row">
+            <div class="tk-price"><span class="label">Price now</span><strong id="tkPrice">–</strong></div>
+            <label><span class="label">Order</span>
+              <select id="tkType">
+                <option value="market">Market</option>
+                <option value="limit">Limit</option>
+                <option value="stop">Stop</option>
+              </select>
+            </label>
+            <label id="tkPriceField" hidden><span class="label">Order price</span><input id="tkOrderPrice" type="number" min="0" step="0.05"></label>
+            <label><span class="label">Quantity</span><input id="tkQty" type="number" min="1" step="1" value="1"></label>
+            <label><span class="label">Stop loss (points)</span><input id="tkSl" type="number" min="0" step="0.05"></label>
+            <label><span class="label">Target (points)</span><input id="tkTp" type="number" min="0" step="0.05"></label>
+            <div class="tk-rr"><span class="label">Reward : risk</span><strong id="tkRR">–</strong></div>
+            <button id="tkAtr" title="Set the stop to 1× and the target to 2× the recent average candle range (ATR 14)">Use ATR</button>
+            <button id="tkBuy" class="buy">Buy</button>
+            <button id="tkSell" class="sell">Sell</button>
+          </div>
+          <p class="muted small" id="tkRisk"></p>
+          <p class="tk-msg" id="tkMsg" role="status"></p>
+          <div id="tkPositions"></div>
+          <p class="muted small">On the chart: right-click for Buy / Sell (market, or a limit / stop at the clicked price), drag the dashed SL, target and order lines to move them, and right-click again to reverse, close or cancel. Keys: <kbd>B</kbd> buy · <kbd>S</kbd> sell · <kbd>R</kbd> reverse · <kbd>X</kbd> close all · <kbd>→</kbd> / <kbd>←</kbd> step in Playback. Practice trades stay in this browser and clear when you change data or reload.</p>
+        </div>
+      </section>
+    </section>
+
+    <aside class="sidebar">
+      <section class="card journal" id="journalCard" hidden></section>
+
+      <section class="card stats" id="statsCard"></section>
+
+      <section class="card latest" id="latestCard" hidden></section>
+
+      <section class="card">
+        <h2 id="howTitle">How it works</h2>
+        <p id="howSummary" class="muted"></p>
+        <ol id="howSteps" class="steps"></ol>
+        <p class="muted small" id="exitNote"></p>
+      </section>
+
+      <section class="card">
+        <h2>Signal log</h2>
+        <ul id="signalLog" class="log"></ul>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="foot">
+    Educational demonstration. Signals are shown to explain how each strategy works. They are not trade recommendations.
+    Synthetic data is generated by software and any win rate shown on it is simulated.
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

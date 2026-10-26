@@ -1,0 +1,24 @@
+{
+  "name": "strategy-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Educational demo: strategy signals on historical playback and synthetic candles",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test test/*.test.js",
+    "export-db": "node scripts/export-from-db.js",
+    "add-data": "node scripts/add-data.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "express": "^4.21.2",
+    "lightweight-charts": "4.2.3"
+  },
+  "optionalDependencies": {
+    "pg": "^8.13.1"
+  }
+}

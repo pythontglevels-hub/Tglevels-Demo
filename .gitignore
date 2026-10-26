@@ -1,0 +1,8 @@
+node_modules/
+public/charting_library/
+node_modules/
+.vercel/
+data/
+# TradingView's charting_library (public/charting_library/) is committed so
+# Vercel can serve it. TradingView's licence requires it to stay private:
+# only push this project to a PRIVATE repository.
