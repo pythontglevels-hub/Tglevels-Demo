@@ -84,6 +84,10 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .pb-pos { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .livebar .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--short); animation: pulse 1.2s infinite; }
 .livebar.paused .dot { animation: none; background: var(--muted); }
+.livebar .live-speed { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; }
+.playback .select-bar.armed { background: var(--accent); color: #fff; }
+.chart-wrap.selecting { cursor: crosshair; }
+.chart-wrap.selecting::after { content: 'Click a candle to start the replay from there'; position: absolute; top: 46px; left: 50%; transform: translateX(-50%); z-index: 5; background: rgba(59,130,246,0.92); color: #fff; padding: 5px 12px; border-radius: 6px; font-size: 12.5px; pointer-events: none; white-space: nowrap; }
 @keyframes pulse { 50% { opacity: 0.3; } }
 
 .sidebar { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
@@ -167,8 +171,10 @@ kbd { background: var(--panel-2); border: 1px solid var(--line); border-radius: 
 /* TradingView attribution, required by the Advanced Charts licence. */
 .tv-attribution {
   margin: 8px 0 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
-  display: flex; flex-wrap: wrap; align-items: baseline; justify-content: center; gap: 4px 12px; text-align: center; line-height: 1.5;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px 12px; text-align: center; line-height: 1.5;
 }
+.tv-logo { display: inline-flex; align-self: center; }
+.tv-logo img { display: block; height: 22px; width: auto; }
 .tv-main { font-size: 15px; font-weight: 600; color: var(--text); }
 .tv-main a { color: #2962ff; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
 .tv-main a:hover, .tv-main a:focus-visible { color: #5b8cff; }

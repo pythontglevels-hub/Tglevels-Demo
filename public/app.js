@@ -5,16 +5,17 @@ const $ = (id) => document.getElementById(id);
 const state = {
   config: null,
   chart: null,
-  source: 'historical',
-  mode: 'full',
+  mode: 'full', // 'full' | 'playback' (Replay) | 'live'
   candles: [],
   overlays: [],
   label: null,
-  timeframe: '5m',
+  timeframe: '1m',
   cursor: 0,
+  selecting: false, // Replay: waiting for a click on the candle to start from
   playing: false,
   live: null, // EventSource
-  liveBars: 0,
+  liveBars: 0, // closed candles the live market has made so far
+  liveFrac: 0, // how far the forming candle has got (0-1), so a resume picks it up there
   seenSignals: new Set(),
   primed: false, // false until the first signal list of a load has been shown
   requestId: 0,
@@ -28,8 +29,8 @@ const state = {
 // Every element the script uses. If one is missing, index.html on the
 // server is older than app.js (only some files were replaced, or an old
 // copy is cached), and the page says so instead of failing halfway.
-const REQUIRED_IDS = ['sourceSeg', 'dataset', 'strategy', 'modeSeg', 'regenerate', 'target', 'targetOut', 'steer',
-  'chart', 'pbStart', 'pbBack', 'pbFwd', 'pbPlay', 'pbSlider', 'liveSpeed', 'livePause',
+const REQUIRED_IDS = ['profile', 'timeframe', 'strategy', 'modeSeg', 'regenerate', 'target', 'targetOut', 'steer',
+  'chart', 'pbSelect', 'pbStart', 'pbBack', 'pbFwd', 'pbEnd', 'pbPlay', 'pbSlider', 'liveSpeed', 'livePause',
   'tkBuy', 'tkSell', 'tkAtr', 'tkType', 'tkPriceField', 'tkOrderPrice', 'tkQty', 'tkSl', 'tkTp', 'tkRisk', 'tkMsg', 'tkPositions'];
 
 async function init() {
@@ -41,27 +42,31 @@ async function init() {
   state.config = await getJson('/api/config');
   state.chart = await createChart();
 
-  $('strategy').innerHTML = state.config.strategies.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
-  const usable = state.config.datasets.filter((d) => !d.error);
-  $('dataset').innerHTML = usable.length
-    ? usable.map((d) => `<option value="${esc(d.id)}">${esc(d.name)} (${d.timeframe}, ${d.bars} bars)</option>`).join('')
-    : '<option value="">No datasets loaded</option>';
-  state.source = usable.length ? 'historical' : 'synthetic';
+  const cfg = state.config;
+  $('strategy').innerHTML = cfg.strategies.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+  // Market models: generic, or modelled on a dataset the developer added.
+  // Only the dataset's volatility, price level, gaps and volume are used.
+  $('profile').innerHTML = ['<option value="generic">Generic index</option>']
+    .concat(cfg.profiles.map((p) => `<option value="${esc(p.id)}">Modelled on ${esc(p.name)}</option>`)).join('');
+  $('timeframe').innerHTML = cfg.timeframes.map((tf) => `<option value="${tf}"${tf === cfg.defaultTimeframe ? ' selected' : ''}>${tfName(tf)}</option>`).join('');
+  fillLiveSpeeds();
 
-  bindSeg('sourceSeg', (v) => { state.source = v; if (v === 'historical' && state.mode === 'live') state.mode = 'full'; reload(); });
   bindSeg('modeSeg', (v) => { state.mode = v; reload(); });
-  $('dataset').addEventListener('change', reload);
+  $('profile').addEventListener('change', reload);
+  $('timeframe').addEventListener('change', () => { fillLiveSpeeds(); reload(); });
   $('strategy').addEventListener('change', reload);
   $('regenerate').addEventListener('click', reload);
   $('target').addEventListener('input', () => { $('targetOut').textContent = `${$('target').value}%`; });
   $('steer').addEventListener('change', () => { $('target').disabled = !$('steer').checked; });
 
-  $('pbStart').addEventListener('click', () => { pause(); seek(0); });
-  $('pbBack').addEventListener('click', () => { pause(); seek(state.cursor - 1); });
-  $('pbFwd').addEventListener('click', () => { pause(); seek(state.cursor + 1); });
-  $('pbPlay').addEventListener('click', () => (state.playing ? pause() : play()));
-  $('pbSlider').addEventListener('input', () => { pause(); seek(Number($('pbSlider').value)); });
-  $('liveSpeed').addEventListener('change', () => { if (state.live) startLive(state.liveBars); });
+  $('pbSelect').addEventListener('click', () => (state.selecting ? endSelect() : startSelect()));
+  $('pbStart').addEventListener('click', () => { pause(); endSelect(); seek(0); });
+  $('pbBack').addEventListener('click', () => { pause(); endSelect(); seek(state.cursor - 1); });
+  $('pbFwd').addEventListener('click', () => { pause(); endSelect(); seek(state.cursor + 1); });
+  $('pbEnd').addEventListener('click', () => { pause(); endSelect(); seek(state.candles.length - 1); });
+  $('pbPlay').addEventListener('click', () => { endSelect(); return state.playing ? pause() : play(); });
+  $('pbSlider').addEventListener('input', () => { pause(); endSelect(); seek(Number($('pbSlider').value)); });
+  $('liveSpeed').addEventListener('change', () => { if (state.live) startLive(state.liveBars, state.liveFrac); else updateLiveStatus(); });
   $('livePause').addEventListener('click', toggleLivePause);
 
   $('tkBuy').addEventListener('click', () => placeTrade('long'));
@@ -81,6 +86,13 @@ async function init() {
     moveOrder,
     cancelOrder,
     contextMenu,
+    // The chart's own interval menu: same as picking a timeframe above it.
+    timeframe: (tf) => {
+      if (tf === $('timeframe').value || ![...$('timeframe').options].some((o) => o.value === tf)) return;
+      $('timeframe').value = tf;
+      fillLiveSpeeds();
+      reload();
+    },
   });
   document.addEventListener('keydown', onKey);
 
@@ -126,52 +138,73 @@ function bindSeg(id, onChange) {
 }
 
 function syncControls() {
-  for (const b of $('sourceSeg').children) b.classList.toggle('active', b.dataset.value === state.source);
-  for (const b of $('modeSeg').children) {
-    b.classList.toggle('active', b.dataset.value === state.mode);
-    if (b.dataset.value === 'live') b.disabled = state.source !== 'synthetic';
-  }
-  const synthetic = state.source === 'synthetic';
-  $('datasetField').hidden = synthetic;
-  $('syntheticSettings').hidden = !synthetic;
+  for (const b of $('modeSeg').children) b.classList.toggle('active', b.dataset.value === state.mode);
   $('bars').disabled = state.mode === 'live';
   $('playbackBar').hidden = state.mode !== 'playback';
   $('liveBar').hidden = state.mode !== 'live';
   $('ticketOff').hidden = state.mode !== 'full';
   $('ticketOn').hidden = state.mode === 'full';
-  $('ticketTag').className = `tag ${synthetic ? 'sim' : 'hist'}`;
-  $('ticketTag').textContent = synthetic ? 'SIMULATED PRICES' : 'PAPER TRADE ON HISTORY';
+  $('ticketTag').className = 'tag sim';
+  $('ticketTag').textContent = 'SIMULATED PRICES';
 
-  // Simulated labelling on the chart itself, whenever synthetic data is shown.
-  $('simWatermark').hidden = !synthetic;
-  $('simBadge').hidden = !synthetic;
-  document.querySelector('.chart-wrap').classList.toggle('simulated', synthetic);
+  // Every candle is simulated, and the chart always says so.
+  $('simWatermark').hidden = false;
+  $('simBadge').hidden = false;
+  document.querySelector('.chart-wrap').classList.add('simulated');
 
   const s = currentStrategy();
   $('howTitle').textContent = `How ${s.name} works`;
   $('howSummary').textContent = s.summary;
   $('howSteps').innerHTML = s.steps.map((t) => `<li>${esc(t)}</li>`).join('');
-  const d = state.config.demoExit;
-  $('exitNote').textContent = s.exitRule === 'demo'
-    ? `This strategy marks entries but has no exit rule of its own. To show results, the demo closes every trade the same way: stop ${d.stopAtr}× ATR(${d.atrLen}), target ${d.targetAtr}× ATR, or after ${d.maxBars} candles. The exit rule is a demo device, not part of the strategy.`
-    : 'Trades use this strategy\'s own exit rules.';
+  $('exitNote').textContent = `Exits: ${s.exits}`;
 }
 
 const currentStrategy = () => state.config.strategies.find((s) => s.id === $('strategy').value);
 
 function params(extra = {}) {
-  const p = new URLSearchParams({ source: state.source, strategy: $('strategy').value });
-  if (state.source === 'historical') p.set('dataset', $('dataset').value);
-  else {
-    p.set('seed', $('seed').value);
-    p.set('bars', $('bars').value);
-    p.set('condition', $('condition').value);
-    p.set('volatility', $('volatility').value);
-    p.set('steer', $('steer').checked ? '1' : '0');
-    p.set('targetWinRate', String(Number($('target').value) / 100));
-  }
+  const p = new URLSearchParams({
+    strategy: $('strategy').value,
+    profile: $('profile').value,
+    timeframe: $('timeframe').value,
+    seed: $('seed').value,
+    bars: $('bars').value,
+    condition: $('condition').value,
+    volatility: $('volatility').value,
+    steer: $('steer').checked ? '1' : '0',
+    targetWinRate: String(Number($('target').value) / 100),
+  });
   for (const [k, v] of Object.entries(extra)) p.set(k, v);
   return p;
+}
+
+const TF_MINUTES = { '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30, '1h': 60 };
+const tfName = (tf) => (tf === '1h' ? '1 hour' : `${TF_MINUTES[tf]} minute${TF_MINUTES[tf] > 1 ? 's' : ''}`);
+
+function fmtDuration(ms) {
+  if (ms >= 3600000) return `${+(ms / 3600000).toFixed(1)} h`;
+  if (ms >= 60000) return `${+(ms / 60000).toFixed(1)} min`;
+  return `${+(ms / 1000).toFixed(1)} s`;
+}
+
+// Live speeds for the chosen timeframe. 1× is real time: a 1-minute candle
+// takes a minute to form. The default makes a candle take about a minute.
+function fillLiveSpeeds() {
+  const barMs = TF_MINUTES[$('timeframe').value] * 60000;
+  let best = null;
+  const opts = [];
+  for (const speed of state.config.liveSpeeds) {
+    const ms = Math.max(300, barMs / speed);
+    if (opts.length && opts.at(-1).ms === ms) continue; // capped at the fastest the chart can show
+    opts.push({ speed, ms });
+    if (!best || Math.abs(Math.log(ms / 60000)) < Math.abs(Math.log(best.ms / 60000))) best = { speed, ms };
+  }
+  $('liveSpeed').innerHTML = opts.map(({ speed, ms }) => `<option value="${speed}"${speed === best.speed ? ' selected' : ''}>`
+    + `${speed}×${speed === 1 ? ' real time' : ''} · 1 candle / ${fmtDuration(ms)}</option>`).join('');
+}
+
+function updateLiveStatus(text = 'Live') {
+  const o = $('liveSpeed').selectedOptions[0];
+  $('liveStatus').textContent = `${text} · ${tfName($('timeframe').value)} candles · ${o ? o.textContent.split(' · ')[0] : ''} · simulated`;
 }
 
 // ── Loading ────────────────────────────────────────────────────────────
@@ -192,13 +225,9 @@ async function reload() {
   renderTrading();
   const id = ++state.requestId;
 
-  if (state.source === 'historical' && !$('dataset').value) {
-    showEmpty('No historical datasets yet.<br>Add CSV files to <code>data/historical/</code> (see the README), or export them from the dashboard database with <code>npm run export-db</code>.<br>Synthetic data works without any setup.');
-    renderStats(null);
-    renderLog([]);
-    return;
-  }
-  showEmpty(state.source === 'synthetic' && state.mode !== 'live' ? 'Generating synthetic market…' : 'Loading…');
+  state.selecting = false;
+  syncSelect();
+  showEmpty(state.mode !== 'live' ? 'Generating simulated market…' : 'Starting live simulated market…');
 
   if (state.mode === 'live') return startLive();
 
@@ -221,11 +250,14 @@ async function reload() {
     state.chart.fit();
     await analyze(state.candles.length - 1, id);
   } else {
+    // Bar replay, like TradingView's: the whole chart first, then the user
+    // clicks the candle to start from and everything after it is hidden.
+    // Play or step without picking starts at candle 150.
     const n = state.candles.length;
     $('pbSlider').max = String(n - 1);
-    state.cursor = 0;
-    await seek(Math.min(n - 1, 150), true);
-    state.chart.showRecent();
+    state.cursor = Math.min(n - 1, 150);
+    $('pbSlider').value = String(state.cursor);
+    startSelect();
   }
   fillAtrDefaults();
 }
@@ -244,7 +276,55 @@ function renderAnalysis({ signals, trades, stats }) {
   renderLog(signals);
 }
 
-// ── Playback ───────────────────────────────────────────────────────────
+// ── Replay ─────────────────────────────────────────────────────────────
+
+// "Select bar": show every candle (no signals or trades, they belong to the
+// replay), and wait for a click on the candle to start from.
+function startSelect() {
+  if (state.mode !== 'playback' || !state.candles.length) return;
+  pause();
+  cancelPick();
+  state.selecting = true;
+  syncSelect();
+  state.chart.setData(state.candles, state.overlays, state.timeframe, chartTitle());
+  state.chart.setSignals([]);
+  state.chart.setOpenTrades([]);
+  state.chart.setPositions([], null, []);
+  state.chart.fit();
+  // Results and signals would give away what happens next: hide them until a start is picked.
+  $('statsCard').innerHTML = '<span class="tag sim">REPLAY</span><h2>Pick a start candle</h2><p class="muted">Click a candle on the chart. Everything after it is hidden, and the strategy\'s signals and results build up as you step or play forward.</p>';
+  $('signalLog').innerHTML = '<li class="muted">Signals appear as the replay moves forward.</li>';
+  $('latestCard').hidden = true;
+  state.seenSignals = new Set();
+  state.primed = false;
+  $('pbPos').textContent = `Click the candle to start from (or press ▶ to start at candle ${state.cursor + 1})`;
+  message('');
+}
+
+// Leaves "Select bar" without picking: back to where the replay was.
+function endSelect() {
+  if (!state.selecting) return;
+  state.selecting = false;
+  syncSelect();
+  seek(state.cursor, true);
+}
+
+function pickBar(time) {
+  if (time == null) return;
+  const c = state.candles;
+  let i = c.length - 1;
+  while (i > 0 && c[i].time > time) i--;
+  state.selecting = false;
+  syncSelect();
+  seek(Math.max(1, i), true).then(() => state.chart.showRecent());
+}
+
+function syncSelect() {
+  $('pbSelect').classList.toggle('armed', state.selecting);
+  $('pbSelect').textContent = state.selecting ? 'Cancel select' : 'Select bar';
+  document.querySelector('.chart-wrap').classList.toggle('selecting', state.selecting);
+  for (const id of ['tkBuy', 'tkSell']) $(id).disabled = !canTrade();
+}
 
 const prefixOverlays = (end) => state.overlays.map((o) => ({ ...o, values: o.values.slice(0, end + 1) }));
 
@@ -288,15 +368,16 @@ function pause() {
 
 // ── Synthetic live ─────────────────────────────────────────────────────
 
-function startLive(startAt) {
+function startLive(startAt, startFrac) {
   stopLive();
-  const p = params({ msPerCandle: $('liveSpeed').value });
+  const p = params({ speed: $('liveSpeed').value });
   if (startAt) p.set('startAt', String(startAt));
+  if (startFrac) p.set('startFrac', String(startFrac));
   const es = new EventSource(`/api/live?${p}`);
   state.live = es;
   $('liveBar').classList.remove('paused');
   $('livePause').textContent = 'Pause';
-  $('liveStatus').textContent = 'Live synthetic market · simulated';
+  updateLiveStatus(startAt ? 'Connecting' : 'Starting');
 
   es.addEventListener('snapshot', (e) => {
     const d = JSON.parse(e.data);
@@ -308,6 +389,7 @@ function startLive(startAt) {
     state.liveBars = d.label.generated;
     state.forming = null;
     state.liveRetries = 0;
+    updateLiveStatus();
     renderLegend(d.overlays);
     state.chart.setData(d.candles, d.overlays, state.timeframe, chartTitle());
     state.chart.showRecent();
@@ -317,6 +399,8 @@ function startLive(startAt) {
   });
   es.addEventListener('tick', (e) => {
     const c = JSON.parse(e.data);
+    state.liveFrac = c.frac;
+    delete c.frac;
     state.forming = c;
     state.chart.update(c);
     state.trader.update(c, state.candles.length);
@@ -325,6 +409,7 @@ function startLive(startAt) {
   es.addEventListener('bar', (e) => {
     const d = JSON.parse(e.data);
     state.liveBars = d.label.generated;
+    state.liveFrac = 0;
     state.forming = null;
     state.candles.push(d.candle);
     state.chart.update(d.candle, d.overlayPoints);
@@ -344,8 +429,8 @@ function startLive(startAt) {
       $('liveStatus').textContent = 'Live stream closed. Switch mode to restart.';
       return;
     }
-    $('liveStatus').textContent = 'Reconnecting… · simulated';
-    setTimeout(() => { if (state.live === es) startLive(state.liveBars); }, 1000 * state.liveRetries);
+    updateLiveStatus('Reconnecting…');
+    setTimeout(() => { if (state.live === es) startLive(state.liveBars, state.liveFrac); }, 1000 * state.liveRetries);
   };
 }
 
@@ -361,15 +446,15 @@ function toggleLivePause() {
     stopLive();
     $('liveBar').classList.add('paused');
     $('livePause').textContent = 'Resume';
-    $('liveStatus').textContent = 'Paused · simulated';
+    updateLiveStatus('Paused');
   } else {
-    startLive(state.liveBars);
+    startLive(state.liveBars, state.liveFrac);
   }
 }
 
 // ── Practice trading ───────────────────────────────────────────────────
 
-const canTrade = () => state.mode !== 'full' && state.candles.length > 0;
+const canTrade = () => state.mode !== 'full' && state.candles.length > 0 && !state.selecting;
 
 // The candle "now": the playback cursor, or the forming candle in Live.
 function nowCandle() {
@@ -416,7 +501,7 @@ function message(text, error = false) {
 // Buy / Sell from the panel, keys, chart header or right-click menu.
 // `atPrice` comes from the right-click menu (a limit / stop at that price).
 function placeTrade(side, { type = $('tkType').value, atPrice = null } = {}) {
-  if (!canTrade()) return message('Switch to Playback or Live to trade.', true);
+  if (!canTrade()) return message(state.selecting ? 'Pick the replay\'s start candle on the chart first.' : 'Switch to Replay or Live to trade.', true);
   const sl = Number($('tkSl').value);
   const tp = Number($('tkTp').value);
   if (!(sl > 0) || !(tp > 0)) return message('Enter a stop loss and a target distance in points first.', true);
@@ -427,7 +512,7 @@ function placeTrade(side, { type = $('tkType').value, atPrice = null } = {}) {
   try {
     if (type === 'market') {
       const t = state.trader.enter({ side, price: market, candle, index, forming, qty: qty(), sl: tick(market - dir * sl), tp: tick(market + dir * tp) });
-      message(`${buy ? 'Bought' : 'Sold'} ${t.qty} at ${fmtP(market)}. SL ${fmtP(t.sl)}, target ${fmtP(t.tp)}.${state.mode === 'playback' ? ' Step or play forward to see how it plays out.' : ''}`);
+      message(`${buy ? 'Bought' : 'Sold'} ${t.qty} at ${fmtP(market)}. SL ${fmtP(t.sl)}, target ${fmtP(t.tp)}.${state.mode === 'playback' ? ' Step or play the replay forward to see how it plays out.' : ''}`);
     } else {
       const price = tick(atPrice ?? Number($('tkOrderPrice').value));
       const o = state.trader.placeOrder({ side, type, price, marketPrice: market, slPts: sl, tpPts: tp, qty: qty(), candle, index });
@@ -499,7 +584,8 @@ function onPositionAction(e) {
   renderTrading();
 }
 
-function onChartPrice(price) {
+function onChartPrice(price, time) {
+  if (state.selecting) return pickBar(time);
   if (!state.pick) return;
   const { id, field } = state.pick;
   cancelPick();
@@ -531,7 +617,7 @@ function cancelPick() {
 
 // Right-click menu on the chart (Advanced Charts).
 function contextMenu(price) {
-  if (!canTrade()) return [{ text: 'Switch to Playback or Live to trade', action: () => {} }];
+  if (!canTrade()) return [{ text: state.selecting ? 'Click a candle to start the replay' : 'Switch to Replay or Live to trade', action: () => {} }];
   const p = tick(price);
   const market = nowCandle().candle.close;
   const above = p > market;
@@ -564,6 +650,7 @@ function onKey(e) {
   if (e.target.closest('input, select, textarea') || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key.toLowerCase();
   if (k === 'escape' && state.pick) { cancelPick(); message(''); return; }
+  if (k === 'escape' && state.selecting) { endSelect(); return; }
   if (!canTrade()) return;
   if (k === 'b') placeTrade('long');
   else if (k === 's') placeTrade('short');
@@ -572,6 +659,7 @@ function onKey(e) {
   else if (state.mode === 'playback' && (k === 'arrowright' || k === 'arrowleft')) {
     e.preventDefault();
     pause();
+    endSelect();
     seek(state.cursor + (k === 'arrowright' ? 1 : -1));
   }
 }
@@ -628,8 +716,7 @@ function renderJournal() {
   const trades = state.trader.trades;
   card.hidden = trades.length === 0;
   if (!trades.length) return;
-  const synthetic = state.source === 'synthetic';
-  card.classList.toggle('simulated', synthetic);
+  card.classList.add('simulated');
   const s = state.trader.stats();
   const pct = s.winRate == null ? '–' : `${(s.winRate * 100).toFixed(0)}%`;
   const sign = (v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}`;
@@ -639,10 +726,8 @@ function renderJournal() {
     <span class="badge ${t.side}">${t.side === 'long' ? 'BUY' : 'SELL'} ${t.qty}</span>
     ${fmtP(t.entryPrice)} → ${fmtP(t.exitPrice)} (${exitName[t.status]})
     <span class="badge ${t.r > 0 ? 'win' : 'loss'}">${fmtRs(t.points * t.qty)} · ${sign(t.r)}R</span></li>`).join('');
-  const note = synthetic
-    ? '<strong>Practice on simulated prices.</strong> These candles are generated by software, so this score is not real trading performance. Outcome steering, if on, follows the strategy\'s trades, not yours.'
-    : 'Paper trades on a replay of recorded prices. No real money, brokerage or slippage. Doing well here does not predict live results.';
-  card.innerHTML = `<span class="tag ${synthetic ? 'sim' : 'hist'}">${synthetic ? 'SIMULATED' : 'PAPER TRADES'}</span>
+  const note = '<strong>Practice on simulated prices.</strong> These candles are generated by software, so this score is not real trading performance. Outcome steering, if on, follows the strategy\'s trades, not yours.';
+  card.innerHTML = `<span class="tag sim">SIMULATED</span>
     <h2>Your practice trades</h2>
     <div class="grid">
       <div><div class="num">${pct}</div><div class="cap">win rate</div></div>
@@ -657,32 +742,22 @@ function renderJournal() {
 
 function renderStats(stats) {
   const card = $('statsCard');
-  card.classList.toggle('simulated', !!stats?.simulated);
+  card.classList.add('simulated');
   if (!stats) { card.innerHTML = '<h2>Results</h2><p class="muted">No data loaded.</p>'; return; }
 
   const pct = (v) => (v == null ? '–' : `${(v * 100).toFixed(1)}%`);
   const r = (v) => (v == null ? '–' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}R`);
-  const exit = stats.exitRule === 'demo' ? 'demo exit rule' : "the strategy's own exits";
-  const scope = { full: 'whole series', playback: 'candles shown so far', live: 'this live session' }[state.mode];
+  const scope = { full: 'whole chart', playback: 'replay so far', live: 'this live session' }[state.mode];
+  const head = `<span class="tag sim">SIMULATED RESULTS</span>
+     <h2>${esc(stats.profileName || 'Simulated market')} model · ${esc(stats.timeframe)} · ${esc(scope)}</h2>`;
 
-  const head = stats.simulated
-    ? `<span class="tag sim">SIMULATED RESULTS</span>
-       <h2>Synthetic market · ${esc(scope)}</h2>`
-    : `<span class="tag hist">HISTORICAL BACKTEST</span>
-       <h2>${esc(stats.name)} · ${esc(stats.timeframe)} · ${esc(scope)}</h2>`;
-
-  let note;
-  if (stats.simulated && stats.steer) {
-    note = `<strong>Not real market performance.</strong> These candles were generated by software with outcome steering on: before each trade plays out, the generator picks win or loss so that about <strong>${pct(stats.targetWinRate)}</strong> of trades win, then moves the price there. The win rate above shows that setting at work. It tells you nothing about how the strategy would do in a real market.`;
-  } else if (stats.simulated) {
-    note = `<strong>Not real market performance.</strong> Software-generated candles (${esc(stats.condition)} market, ${esc(stats.volatility)} volatility) with no outcome steering. Useful for seeing how the strategy reacts to a kind of market, not for judging how it performs on real prices.`;
-  } else {
-    note = `Backtest on recorded prices using ${exit}. No costs or slippage. Past results do not predict future results, and this is not a recommendation to trade.`;
-  }
+  const note = stats.steer
+    ? `<strong>Not real market performance.</strong> These candles were generated by software with outcome steering on: before each trade plays out, the generator picks win or loss so that about <strong>${pct(stats.targetWinRate)}</strong> of trades win, then moves the price there. The win rate above shows that setting at work. It tells you nothing about how the strategy would do in a real market.`
+    : `<strong>Not real market performance.</strong> Software-generated candles (${esc(stats.condition)} market, ${esc(stats.volatility)} volatility) with no outcome steering. Useful for seeing how the strategy reacts to a kind of market, not for judging how it performs on real prices.`;
 
   card.innerHTML = `${head}
     <div class="grid">
-      <div><div class="num">${pct(stats.winRate)}</div><div class="cap">${stats.simulated ? 'simulated win rate' : 'win rate'}</div></div>
+      <div><div class="num">${pct(stats.winRate)}</div><div class="cap">simulated win rate</div></div>
       <div><div class="num">${stats.trades}</div><div class="cap">closed trades${stats.open ? ` (+${stats.open} open)` : ''}</div></div>
       <div><div class="num">${r(stats.avgR)}</div><div class="cap">avg per trade</div></div>
     </div>
@@ -721,7 +796,7 @@ function renderLegend(overlays) {
   $('legend').innerHTML = overlays.map((o) => `<span><i style="background:${o.color}"></i>${esc(o.title)}</span>`).join('');
 }
 
-const chartTitle = () => (state.source === 'synthetic' ? 'Synthetic market (simulated)' : state.label?.name || 'Historical');
+const chartTitle = () => `Simulated · ${state.label?.profileName || 'Generic index'} model`;
 
 function showEmpty(html) {
   html = html || state.chartMissing; // keep the "library missing" note up

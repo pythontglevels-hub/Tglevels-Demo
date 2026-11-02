@@ -2,8 +2,10 @@
 'use strict';
 
 /**
- * Adds historical candles to the site from an Excel (.xlsx) or CSV file.
- * The site picks the new dataset up immediately: no restart, no downtime.
+ * Adds historical candles from an Excel (.xlsx) or CSV file as a market
+ * model. The site never shows these candles: it only measures their price
+ * level, volatility, overnight gaps and volume, and generates synthetic
+ * candles that behave like that market. Picked up immediately, no restart.
  *
  *   npm run add-data -- path/to/BAJFINANCE_15min.xlsx
  *   npm run add-data -- path/to/file.csv --name NIFTY_5m
@@ -131,7 +133,9 @@ async function main() {
 
   const day = (ms) => new Date(ms + 330 * 60000).toISOString().slice(0, 16).replace('T', ' ');
   console.log(`Added "${id}": ${s.bars} candles, ${s.timeframe}, ${day(s.from)} → ${day(s.to)} IST`);
-  console.log(`Live now. Visitors see "${id.replace(/[_-]+/g, ' ')}" in the Dataset list after reloading the page.`);
+  console.log(`Live now. Visitors see "Modelled on ${id.replace(/[_-]+/g, ' ')}" in the Market model list after reloading the page.`);
+  console.log('The candles themselves are never shown. They only set the synthetic market\'s price level, volatility, gaps and volume.');
+  if (!/^\d+m$|^1h$/.test(s.timeframe)) console.log(`Note: ${s.timeframe} candles can't be used as a market model (needs 1 minute to 1 hour).`);
 }
 
 main().catch((err) => {

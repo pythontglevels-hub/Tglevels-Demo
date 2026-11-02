@@ -4,7 +4,7 @@
 // in public/charting_library/. See README.md.
 //
 // What it draws:
-//   - candles from our own datafeed (historical, synthetic, playback, live)
+//   - candles from our own datafeed (synthetic: full chart, replay, live)
 //   - the strategy's indicator lines, through a custom indicator
 //   - strategy signals as arrows
 //   - the user's practice trades: an entry line with running P&L, stop loss
@@ -17,17 +17,19 @@
 // The adapter talks back to app.js through setTradeHandlers().
 
 const TIMEFRAME_TO_RESOLUTION = { '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '2h': '120', '4h': '240', '1D': '1D' };
+const RESOLUTION_TO_TIMEFRAME = Object.fromEntries(Object.entries(TIMEFRAME_TO_RESOLUTION).map(([k, v]) => [v, k]));
+// Timeframes the synthetic market can generate (the chart's interval menu offers these).
+const CHART_RESOLUTIONS = ['1', '3', '5', '15', '30', '60'];
 const PRICE_SCALE = 100; // 0.01 tick
 const MAX_SIGNAL_SHAPES = 400; // newest signals only, so long files stay fast
 
 // Fixed slots for the strategy lines. Every strategy's overlays map onto these.
 const SLOTS = [
-  { title: 'VWAP', color: '#f59e0b', ids: ['vwap'] },
-  { title: 'Upper band', color: '#a78bfa', ids: ['bandUp', 'upper'] },
-  { title: 'Lower band', color: '#a78bfa', ids: ['bandDn', 'lower'] },
-  { title: 'EMA9 high', color: '#38bdf8', ids: ['emaHigh'] },
-  { title: 'EMA9 low', color: '#0ea5e9', ids: ['emaLow', 'ema9Low'] },
-  { title: 'Ceiling', color: '#f43f5e', ids: ['ceiling'] },
+  { title: 'BB upper', color: '#a78bfa', ids: ['bbUpper'] },
+  { title: 'BB middle', color: '#f59e0b', ids: ['bbMiddle'] },
+  { title: 'BB lower', color: '#a78bfa', ids: ['bbLower'] },
+  { title: 'EMA 9', color: '#38bdf8', ids: ['ema9'] },
+  { title: 'EMA 50', color: '#f59e0b', ids: ['ema50'] },
 ];
 const SLOT_OF = Object.fromEntries(SLOTS.flatMap((s, i) => s.ids.map((id) => [id, i])));
 const INDICATOR = 'Strategy Lines';
@@ -62,7 +64,7 @@ export class AdvancedChart {
         autosize: true,
         custom_indicators_getter: (PineJS) => Promise.resolve([this.indicator(PineJS)]),
         disabled_features: [
-          'header_symbol_search', 'header_compare', 'symbol_search_hot_key', 'header_resolutions',
+          'header_symbol_search', 'header_compare', 'symbol_search_hot_key',
           'header_saveload', 'use_localstorage_for_settings', 'timeframes_toolbar', 'display_market_status',
         ],
         overrides: {
@@ -77,6 +79,11 @@ export class AdvancedChart {
       });
       this.widget.chartReady().then(() => {
         this.chart.onDataLoaded().subscribe(null, () => this.onHistoryLoaded());
+        // Picking a timeframe in the chart's interval menu generates that
+        // timeframe (app.js reloads, the same as the Timeframe select).
+        this.chart.onIntervalChanged().subscribe(null, (interval) => {
+          if (interval !== this.resolution && RESOLUTION_TO_TIMEFRAME[interval]) this.handlers.timeframe?.(RESOLUTION_TO_TIMEFRAME[interval]);
+        });
         this.chart.createStudy(INDICATOR, true, true);
         this.widget.onContextMenu((unixtime, price) => this.contextMenu(price));
         this.widget.headerReady().then(() => this.headerButtons());
@@ -108,12 +115,12 @@ export class AdvancedChart {
 
   datafeed() {
     return {
-      onReady: (cb) => setTimeout(() => cb({ supported_resolutions: Object.values(TIMEFRAME_TO_RESOLUTION) })),
+      onReady: (cb) => setTimeout(() => cb({ supported_resolutions: CHART_RESOLUTIONS })),
       searchSymbols: (input, exchange, type, onResult) => onResult([]),
       resolveSymbol: (name, onResolve) => setTimeout(() => onResolve({
         name: this.title, ticker: name, description: this.title, type: 'stock', exchange: 'Strategy Lab', listed_exchange: 'Strategy Lab',
         session: '24x7', timezone: 'Asia/Kolkata', format: 'price', minmov: 1, pricescale: PRICE_SCALE,
-        has_intraday: !this.daily, has_daily: true, supported_resolutions: [this.resolution],
+        has_intraday: !this.daily, has_daily: true, supported_resolutions: CHART_RESOLUTIONS,
         visible_plots_set: 'ohlcv', volume_precision: 0, data_status: 'streaming',
       })),
       // The chart loads the latest bars first and asks for older ones as
@@ -247,7 +254,8 @@ export class AdvancedChart {
       const d = await this.chart.exportData({ includeTime: true, includeSeries: false, includedStudies: [] });
       return d.data.length ? d.data[0][0] * 1000 : Infinity;
     } catch (err) {
-      console.warn('Advanced Charts: exportData', err);
+      // "points range is null": nothing loaded yet (e.g. mid timeframe switch). onDataLoaded redraws later.
+      if (!/range is null/.test(err?.message)) console.warn('Advanced Charts: exportData', err);
       return this.bars.length ? this.bars[Math.max(0, this.bars.length - 300)].time : Infinity;
     }
   }
@@ -472,11 +480,13 @@ export class AdvancedChart {
     add('Close all', '#334155', 'Close every open practice trade', () => this.handlers.closeAll?.());
   }
 
+  // cb(price, time): time is the candle under the cursor (epoch ms), used by Replay's "Select bar".
   onClickPrice(cb) {
     this.ready().then(() => {
       let price = null;
-      this.chart.crossHairMoved().subscribe(null, (p) => { price = p.price; });
-      this.widget.subscribe('mouse_down', () => { if (price != null) cb(price); });
+      let time = null;
+      this.chart.crossHairMoved().subscribe(null, (p) => { price = p.price; time = p.time != null ? p.time * 1000 : null; });
+      this.widget.subscribe('mouse_down', () => { if (price != null) cb(price, time); });
     });
   }
 

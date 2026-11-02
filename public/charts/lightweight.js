@@ -1,7 +1,7 @@
 // Chart adapter for TradingView Lightweight Charts (free, Apache-2.0).
 // Same interface as charts/advanced.js so app.js doesn't care which is used.
 
-import { toChartTime, markerFor, userMarkers } from './common.js';
+import { toChartTime, markerFor, userMarkers, IST_OFFSET_S } from './common.js';
 
 export class LightweightChart {
   constructor(el) {
@@ -142,7 +142,8 @@ export class LightweightChart {
       const y = e.clientY - this.el.getBoundingClientRect().top;
       if (y > this.chart.paneSize().height) return; // click on the time axis
       const price = this.candles.coordinateToPrice(y);
-      if (price != null) cb(price);
+      const t = this.chart.timeScale().coordinateToTime(e.clientX - this.el.getBoundingClientRect().left);
+      if (price != null) cb(price, t == null ? null : (t - IST_OFFSET_S) * 1000);
     }, true); // capture: the chart's canvas stops click propagation
   }
 

@@ -105,7 +105,7 @@ If this server already runs nginx for the dashboard, it's the same steps.
 The new file only answers for the subdomain and leaves the other sites
 alone.
 
-## Adding historical data (no downtime)
+## Adding market models (data files, no downtime)
 
 There's no admin page. A developer adds data on the server:
 
@@ -121,8 +121,10 @@ npm run add-data -- /tmp/BAJFINANCE_15min.xlsx
 It accepts Excel (`.xlsx`) or CSV. It checks the file first and prints the
 candle count, timeframe, date range and any rows it had to fix; a bad file
 is refused with the reason and nothing changes on the site. A good file goes
-live immediately, with no restart. Visitors see it in the Dataset list the
-next time they load the page.
+live immediately, with no restart. Visitors see "Modelled on <name>" in the
+Market model list the next time they load the page. The candles themselves
+are never shown: they only set the simulated market's price level,
+volatility, gaps and volume.
 
 | What | Command |
 |------|---------|
@@ -182,8 +184,8 @@ run `pm2 reload deploy/ecosystem.config.js --update-env`.
 
 ## Notes
 
-- The site doesn't connect to the dashboard database. Historical data only
-  comes from the CSVs in the data folder.
+- The site doesn't connect to the dashboard database. Market models only
+  come from the CSVs in the data folder, and no API returns their candles.
 - Live mode keeps one connection open per viewer. `MAX_LIVE_STREAMS`
   (default 50 per process) caps it.
 - If the main tglevels.com is on shared hosting without Node.js support,

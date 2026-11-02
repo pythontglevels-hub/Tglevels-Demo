@@ -8,10 +8,10 @@ page and TradingView's library) as static files.
 
 | Area | On Vercel |
 |---|---|
-| Page, chart, playback, practice trading | Same as before. |
+| Page, chart, replay, practice trading | Same as before. |
 | Live mode | Vercel ends any request after 5 minutes. The server closes the live stream at 4½ minutes and the page reconnects by itself and carries on from the same candle. Open trades are kept. Viewers may see "Reconnecting…" for a second. |
-| Adding historical data | The server can't write files on Vercel. Run `npm run add-data` **on your computer**, then push (or redeploy). Each deploy swaps in all at once, so there's no downtime. |
-| Big datasets | Vercel refuses responses over 4.5 MB. Responses are gzipped (30,000 candles come to about 0.9 MB), so files up to roughly 100,000 candles are fine. |
+| Adding market models (data files) | The server can't write files on Vercel. Run `npm run add-data` **on your computer**, then push (or redeploy). Each deploy swaps in all at once, so there's no downtime. |
+| Data files | They stay on the server and are only read to calibrate the simulated market, so file size doesn't affect what the page downloads. |
 | Plan | Vercel's free Hobby plan is for personal, non-commercial use only. A company site needs the Pro plan. |
 
 ## 1. Put the code in a private GitHub repository
@@ -44,7 +44,7 @@ Check that GitHub shows `public/charting_library/` and the `.csv` files in
    Directory and Install Command alone, because `vercel.json` sets them.
 4. Click **Deploy**. After about a minute you get a URL like
    `strategy-lab-xxxx.vercel.app`. Open it and check the chart loads and the
-   Dataset list shows your files.
+   Market model list shows "Modelled on …" for each of your files.
 
 No environment variables are needed.
 
@@ -67,7 +67,7 @@ No environment variables are needed.
 This only adds a subdomain. The main tglevels.com site and email aren't
 touched.
 
-## Adding or updating historical data
+## Adding or updating market models (data files)
 
 On your computer, in the project folder:
 
@@ -104,7 +104,8 @@ again.
 
 - **"library could not be loaded"**: `public/charting_library/` didn't
   make it into the deploy. Check it's in the repository.
-- **Dataset list empty**: the CSVs aren't in `data/historical/` in the
-  repository.
+- **Only "Generic index" in the Market model list**: the CSVs aren't in
+  `data/historical/` in the repository, or they are daily candles (models
+  need 1-minute to 1-hour data).
 - **Errors in /api calls**: open the project in Vercel, then **Logs**, to
   see the server's error messages.

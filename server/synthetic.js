@@ -3,9 +3,14 @@
 /**
  * Synthetic market generator.
  *
- * Produces 5-minute candles on an NSE-like session (09:15-15:30 IST,
- * weekdays) starting in 2030, so a synthetic chart can never be mistaken
- * for a real past date.
+ * Produces candles (1 minute to 1 hour) on an NSE-like session
+ * (09:15-15:30 IST, weekdays) starting in 2030, so a synthetic chart can
+ * never be mistaken for a real past date.
+ *
+ * Market model: price level, volatility, overnight gap size and volume
+ * come either from generic index-like defaults or from a historical
+ * dataset's summary statistics (server/calibrate.js). Real candles are
+ * never copied: the path is always freshly drawn from the random model.
  *
  * Price model, per bar:
  *   - log returns built from 12 sub-steps (so highs/lows/wicks look real)
@@ -26,10 +31,17 @@
 
 const { getStrategy } = require('./strategies');
 const { sessionClock } = require('./time');
+const calibrate = require('./calibrate');
 
 const START_MS = Date.UTC(2030, 0, 1, 3, 45); // 2030-01-01 09:15 IST
 const SUBSTEPS = 12;
-const BASE_SIGMA = 0.0012; // per 5-min bar, roughly an index future
+const TIMEFRAMES = { '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30, '1h': 60 };
+const DEFAULT_TIMEFRAME = '1m';
+// Generic market: roughly an index future (0.12% per 5-minute bar).
+const GENERIC = {
+  id: 'generic', name: 'Generic index',
+  startPrice: 22000, sigmaPerMinute: 0.0012 / Math.sqrt(5), gapSigma: 0.0018, volumePerMinute: 12000,
+};
 const VOLATILITY = { low: 0.6, normal: 1, high: 1.8 };
 const REGIMES = ['trend-up', 'trend-down', 'range', 'volatile'];
 const GARCH = { alpha: 0.08, beta: 0.9 };
@@ -63,8 +75,21 @@ function normalizeOptions(o = {}) {
     steer: !(o.steer === false || o.steer === 'false' || o.steer === '0'),
     targetWinRate: clamp(num(o.targetWinRate, 0.55), 0.3, 0.7),
     steerStrength: clamp(num(o.steerStrength, 1.0), 0, 2),
-    strategy: getStrategy(o.strategy || 'pinaka').id,
-    startPrice: clamp(num(o.startPrice, 22000), 10, 1e7),
+    strategy: getStrategy(o.strategy).id,
+    timeframe: TIMEFRAMES[o.timeframe] ? o.timeframe : DEFAULT_TIMEFRAME,
+    profile: typeof o.profile === 'string' && o.profile && o.profile !== 'generic' ? o.profile : 'generic',
+    startPrice: o.startPrice == null || o.startPrice === '' ? null : clamp(num(o.startPrice, 22000), 10, 1e7),
+  };
+}
+
+function resolveProfile(id) {
+  if (id === 'generic') return GENERIC;
+  const p = calibrate.profileFor(id);
+  return {
+    ...p,
+    sigmaPerMinute: p.sigmaPerMinute > 0 ? p.sigmaPerMinute : GENERIC.sigmaPerMinute,
+    gapSigma: p.gapSigma > 0 ? p.gapSigma : GENERIC.gapSigma,
+    volumePerMinute: p.volumePerMinute || GENERIC.volumePerMinute,
   };
 }
 
@@ -74,14 +99,21 @@ class SyntheticMarket {
     this.strategy = getStrategy(this.opts.strategy);
     this.rng = mulberry32(this.opts.seed);
     this.outcomeRng = mulberry32(this.opts.seed ^ 0x9e3779b9);
-    this.clock = sessionClock(START_MS, 5);
+    this.profile = resolveProfile(this.opts.profile);
+    this.barMinutes = TIMEFRAMES[this.opts.timeframe];
+    this.clock = sessionClock(START_MS, this.barMinutes);
     this.candles = [];
-    this.logP = Math.log(this.opts.startPrice);
+    this.logP = Math.log(this.opts.startPrice || this.profile.startPrice);
     this.anchor = this.logP;
-    this.base = BASE_SIGMA * VOLATILITY[this.opts.volatility];
+    const volMult = VOLATILITY[this.opts.volatility];
+    this.base = this.profile.sigmaPerMinute * Math.sqrt(this.barMinutes) * volMult;
+    this.gapSigma = this.profile.gapSigma * volMult;
+    // Keep trends, mean reversion and regime lengths similar in clock time
+    // whatever the candle size (all tuned on 5-minute candles).
+    this.tfScale = Math.sqrt(this.barMinutes / 5);
     this.h = this.base * this.base; // GARCH variance
     this.regime = this.opts.condition === 'auto' ? 'range' : this.opts.condition;
-    this.regimeLeft = 80;
+    this.regimeLeft = Math.max(8, Math.round(80 / this.tfScale ** 2));
     this.assigned = new Map(); // trade key -> 'win' | 'loss'
     this.steerTo = null; // price the generator is currently drifting toward
     this.analysis = null;
@@ -94,7 +126,7 @@ class SyntheticMarket {
     const rng = this.rng;
 
     if (barOfSession === 0 && this.candles.length) {
-      this.logP += gaussian(rng) * 1.5 * Math.sqrt(this.h); // overnight gap
+      this.logP += gaussian(rng) * this.gapSigma * (Math.sqrt(this.h) / this.base); // overnight gap
     }
     this.switchRegime();
 
@@ -102,9 +134,10 @@ class SyntheticMarket {
     const intraday = 0.75 + 3.2 * (x - 0.5) * (x - 0.5); // ~1.55 at open/close, 0.75 midday
     let sigma = Math.sqrt(this.h) * intraday;
     let mu = 0;
-    if (this.regime === 'trend-up') mu = 0.15 * sigma;
-    else if (this.regime === 'trend-down') mu = -0.15 * sigma;
-    else if (this.regime === 'range') mu = -0.04 * (this.logP - this.anchor) / this.base * sigma;
+    const k = this.tfScale;
+    if (this.regime === 'trend-up') mu = 0.07 * k * sigma;
+    else if (this.regime === 'trend-down') mu = -0.07 * k * sigma;
+    else if (this.regime === 'range') mu = -0.04 * k * k * (this.logP - this.anchor) / this.base * sigma;
     else if (this.regime === 'volatile') sigma *= 1.7;
 
     if (this.steerTo != null) {
@@ -127,28 +160,37 @@ class SyntheticMarket {
     const { alpha, beta } = GARCH;
     const b2 = this.base * this.base;
     this.h = clamp(b2 * (1 - alpha - beta) + (alpha * eps * eps + beta) * this.h, 0.25 * b2, 9 * b2);
-    if (this.regime !== 'range') this.anchor += 0.02 * (this.logP - this.anchor);
+    if (this.regime !== 'range') this.anchor += Math.min(0.5, 0.02 * this.tfScale ** 2) * (this.logP - this.anchor);
 
-    const round = (v) => Math.round(v * 20) / 20; // 0.05 tick
+    const tick = this.tick();
+    const round = (v) => Math.round(v / tick) * tick;
+    const r2 = (v) => Math.round(round(v) * 100) / 100;
     const candle = {
       time,
-      open: round(path[0]),
-      high: round(Math.max(...path)),
-      low: round(Math.min(...path)),
-      close: round(path[path.length - 1]),
-      volume: Math.round(60000 * intraday * (1 + 2.5 * Math.abs(r) / (sigma || 1e-9)) * Math.exp(0.35 * gaussian(rng))),
+      open: r2(path[0]),
+      high: r2(Math.max(...path)),
+      low: r2(Math.min(...path)),
+      close: r2(path[path.length - 1]),
+      volume: Math.round(this.profile.volumePerMinute * this.barMinutes * intraday * (1 + 2.5 * Math.abs(r) / (sigma || 1e-9)) * Math.exp(0.35 * gaussian(rng))),
     };
     this.candles.push(candle);
     this.generated++;
     this.afterBar();
-    return { candle, path: path.map(round) };
+    return { candle, path: path.map(r2) };
+  }
+
+  /** Price tick: 0.05 like NSE, finer for low-priced instruments. */
+  tick() {
+    const p = Math.exp(this.logP);
+    return p >= 50 ? 0.05 : 0.01;
   }
 
   switchRegime() {
     if (this.opts.condition !== 'auto') return;
     if (--this.regimeLeft > 0) return;
     this.regime = REGIMES[Math.floor(this.rng() * REGIMES.length)];
-    this.regimeLeft = 60 + Math.floor(this.rng() * 200);
+    // Same length in clock time on every timeframe (60-260 five-minute candles).
+    this.regimeLeft = Math.max(8, Math.round((60 + Math.floor(this.rng() * 200)) / this.tfScale ** 2));
     if (this.regime === 'range') this.anchor = this.logP;
   }
 
@@ -198,7 +240,8 @@ class SyntheticMarket {
     return {
       seed: o.seed, condition: o.condition, volatility: o.volatility, steer: o.steer,
       targetWinRate: o.steer ? o.targetWinRate : null, strategy: o.strategy, regime: this.regime,
-      generated: this.generated,
+      generated: this.generated, timeframe: o.timeframe, barMinutes: this.barMinutes,
+      profile: this.profile.id, profileName: this.profile.name,
     };
   }
 }
@@ -209,4 +252,4 @@ function generate(options) {
   return market;
 }
 
-module.exports = { SyntheticMarket, generate, normalizeOptions };
+module.exports = { SyntheticMarket, generate, normalizeOptions, TIMEFRAMES, DEFAULT_TIMEFRAME, GENERIC };

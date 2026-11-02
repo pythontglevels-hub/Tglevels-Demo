@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Strategy Lab</title>
-  <meta name="description" content="Educational demo of trading strategy signals on historical playback and synthetic candles.">
+  <meta name="description" content="Educational demo of trading strategy signals on simulated candles, with bar replay and practice trading.">
   <link rel="icon" href="/favicon.ico" sizes="48x48">
   <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -15,8 +15,7 @@
 <body>
   <div class="disclaimer" role="note">
     <strong>Educational demo only.</strong> Nothing here is investment advice or a recommendation to trade.
-    Synthetic candles are computer-generated and their results are simulated, not real market performance.
-    Historical results do not predict future results.
+    Every candle on this site is computer-generated (simulated), not real market prices, and any result shown is simulated, not real market performance.
   </div>
 
   <header class="top">
@@ -27,15 +26,12 @@
     <section class="workspace">
       <div class="toolbar">
         <div class="field">
-          <span class="label">Data</span>
-          <div class="seg" id="sourceSeg">
-            <button data-value="historical">Historical</button>
-            <button data-value="synthetic">Synthetic</button>
-          </div>
+          <label class="label" for="profile">Market model</label>
+          <select id="profile" title="Sets the simulated market's price level, volatility, gaps and volume. Real prices are never shown."></select>
         </div>
-        <div class="field" id="datasetField">
-          <label class="label" for="dataset">Dataset</label>
-          <select id="dataset"></select>
+        <div class="field">
+          <label class="label" for="timeframe">Timeframe</label>
+          <select id="timeframe"></select>
         </div>
         <div class="field">
           <label class="label" for="strategy">Strategy</label>
@@ -45,14 +41,14 @@
           <span class="label">Mode</span>
           <div class="seg" id="modeSeg">
             <button data-value="full">Full chart</button>
-            <button data-value="playback">Playback</button>
-            <button data-value="live" title="Synthetic data only">Live</button>
+            <button data-value="playback" title="Bar replay: pick a candle, hide everything after it, then step or play forward">Replay</button>
+            <button data-value="live">Live</button>
           </div>
         </div>
       </div>
 
       <details class="synthetic-settings" id="syntheticSettings" open>
-        <summary>Synthetic market settings</summary>
+        <summary>Simulated market settings</summary>
         <div class="settings-grid">
           <label>Market condition
             <select id="condition">
@@ -91,31 +87,30 @@
       <p class="tv-attribution">
         <a class="tv-logo" href="https://tradingview.com/" target="_blank" rel="noopener noreferrer" aria-label="TradingView"><img src="tradingview-logo.svg" alt="TradingView" width="129" height="22"></a>
         <span class="tv-main">Charts powered by <a href="https://tradingview.com/" target="_blank" rel="noopener noreferrer">TradingView</a></span>
-        <span class="tv-thanks">You can visit the TradingView website for more information.</span>
+        <span class="tv-thanks">you can visit Trading view from here</span>
       </p>
 
       <div class="playback" id="playbackBar" hidden>
-        <button id="pbStart" title="Back to start">⏮</button>
-        <button id="pbBack" title="Previous candle">◀</button>
+        <button id="pbSelect" class="select-bar" title="Click a candle on the chart to start the replay from there">Select bar</button>
+        <button id="pbStart" title="Back to the first candle">⏮</button>
+        <button id="pbBack" title="Previous candle (←)">◀</button>
         <button id="pbPlay" class="primary" title="Play / pause">▶</button>
-        <button id="pbFwd" title="Next candle">▶|</button>
-        <input id="pbSlider" type="range" min="0" value="0" aria-label="Playback position">
-        <select id="pbSpeed" aria-label="Playback speed">
-          <option value="1000">1 candle/s</option>
-          <option value="400" selected>2.5 candles/s</option>
-          <option value="150">7 candles/s</option>
-          <option value="50">20 candles/s</option>
+        <button id="pbFwd" title="Next candle (→)">▶|</button>
+        <button id="pbEnd" title="Jump to the last candle">⏭</button>
+        <input id="pbSlider" type="range" min="0" value="0" aria-label="Replay position">
+        <select id="pbSpeed" aria-label="Replay speed">
+          <option value="3000">1 candle / 3 s</option>
+          <option value="1000" selected>1 candle / s</option>
+          <option value="400">2.5 candles / s</option>
+          <option value="150">7 candles / s</option>
+          <option value="50">20 candles / s</option>
         </select>
         <span class="pb-pos" id="pbPos"></span>
       </div>
 
       <div class="livebar" id="liveBar" hidden>
         <span class="dot"></span> <span id="liveStatus">Live synthetic market</span>
-        <select id="liveSpeed" aria-label="Live speed">
-          <option value="2000">1 candle / 2 s</option>
-          <option value="1000" selected>1 candle / s</option>
-          <option value="400">2.5 candles / s</option>
-        </select>
+        <label class="live-speed">Speed <select id="liveSpeed" aria-label="Live speed"></select></label>
         <button id="livePause">Pause</button>
       </div>
 
@@ -124,7 +119,7 @@
           <h2>Practice trade</h2>
           <span class="tag" id="ticketTag"></span>
         </div>
-        <p class="muted small" id="ticketOff">Switch to <strong>Playback</strong> or <strong>Live</strong> to take practice trades. In Playback the candles stay paused while you decide.</p>
+        <p class="muted small" id="ticketOff">Switch to <strong>Replay</strong> or <strong>Live</strong> to take practice trades. In Replay the candles stay paused while you decide.</p>
         <div id="ticketOn">
           <div class="ticket-row">
             <div class="tk-price"><span class="label">Price now</span><strong id="tkPrice">–</strong></div>
@@ -147,7 +142,7 @@
           <p class="muted small" id="tkRisk"></p>
           <p class="tk-msg" id="tkMsg" role="status"></p>
           <div id="tkPositions"></div>
-          <p class="muted small">On the chart: right-click for Buy / Sell (market, or a limit / stop at the clicked price), drag the dashed SL, target and order lines to move them, and right-click again to reverse, close or cancel. Keys: <kbd>B</kbd> buy · <kbd>S</kbd> sell · <kbd>R</kbd> reverse · <kbd>X</kbd> close all · <kbd>→</kbd> / <kbd>←</kbd> step in Playback. Practice trades stay in this browser and clear when you change data or reload.</p>
+          <p class="muted small">On the chart: right-click for Buy / Sell (market, or a limit / stop at the clicked price), drag the dashed SL, target and order lines to move them, and right-click again to reverse, close or cancel. Keys: <kbd>B</kbd> buy · <kbd>S</kbd> sell · <kbd>R</kbd> reverse · <kbd>X</kbd> close all · <kbd>→</kbd> / <kbd>←</kbd> step in Replay. Practice trades stay in this browser and clear when you change data or reload.</p>
         </div>
       </section>
     </section>
@@ -175,7 +170,7 @@
 
   <footer class="foot">
     Educational demonstration. Signals are shown to explain how each strategy works. They are not trade recommendations.
-    Synthetic data is generated by software and any win rate shown on it is simulated.
+    All candles are generated by software and any win rate shown is simulated.
   </footer>
 
   <script type="module" src="app.js"></script>
