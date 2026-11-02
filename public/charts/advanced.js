@@ -76,6 +76,7 @@ export class AdvancedChart {
         },
       });
       this.widget.chartReady().then(() => {
+        this.chart.onDataLoaded().subscribe(null, () => this.onHistoryLoaded());
         this.chart.createStudy(INDICATOR, true, true);
         this.widget.onContextMenu((unixtime, price) => this.contextMenu(price));
         this.widget.headerReady().then(() => this.headerButtons());
@@ -115,19 +116,21 @@ export class AdvancedChart {
         has_intraday: !this.daily, has_daily: true, supported_resolutions: [this.resolution],
         visible_plots_set: 'ohlcv', volume_precision: 0, data_status: 'streaming',
       })),
+      // The chart loads the latest bars first and asks for older ones as
+      // the user scrolls back. Drawings are only placed on bars it has
+      // loaded (see setSignals).
       getBars: (symbolInfo, resolution, { from, to, countBack, firstDataRequest }, onResult) => {
-        if (resolution !== this.resolution) return onResult([], { noData: true });
-        const end = this.bars.findIndex((b) => b.time >= to * 1000);
+        if (resolution !== this.resolution || symbolInfo.ticker !== `DEMO-${this.gen}`) return onResult([], { noData: true });
+        // The first request ends at "now". Synthetic dates are in the
+        // future, so it simply gets the latest bars.
+        const end = firstDataRequest ? -1 : this.bars.findIndex((b) => b.time >= to * 1000);
         const stop = end < 0 ? this.bars.length : end;
         let start = stop;
         while (start > 0 && this.bars[start - 1].time >= from * 1000) start--;
         start = Math.max(0, Math.min(start, stop - (countBack || 0)));
-        // Hand over everything on the first request. Drawings can only be
-        // placed on loaded bars, and even 30,000 candles are cheap.
-        // (Synthetic dates are in the future, past the `to` the chart asks
-        // for, so the first answer ignores `to` as well.)
-        const bars = firstDataRequest ? this.bars.slice() : this.bars.slice(start, stop);
-        onResult(bars, { noData: bars.length === 0 && !firstDataRequest });
+        const bars = this.bars.slice(start, stop);
+        onResult(bars, { noData: bars.length === 0 });
+
       },
       // One subscription per loaded series. A tick meant for the new series
       // must never reach the old one: the chart rejects a bar older than
@@ -183,11 +186,14 @@ export class AdvancedChart {
     this.clearDrawings();
     const gen = ++this.gen;
     this.subscriber = null;
+    this.loadedFrom = Infinity;
+    this.lastSignals = [];
+    this.lastPositions = null;
     this.loading = this.ready().then(() => new Promise((resolve) => {
       // widget.setSymbol takes symbol + interval together. (chart.setSymbol
       // has no interval argument and would leave the old one in place.)
       this.widget.setSymbol(`DEMO-${gen}`, this.resolution, resolve);
-    })).then(() => this.dataReady());
+    })).then(() => this.dataReady()).then(() => this.firstLoadedBar()).then((t) => { if (gen === this.gen) this.loadedFrom = t; });
     return this.loading;
   }
 
@@ -229,9 +235,44 @@ export class AdvancedChart {
   // Arrows with a label. (Execution shapes, order lines and position lines
   // are Trading Platform only, so everything here uses plain drawings,
   // which Advanced Charts has.)
-  async setSignals(signals) {
+  // A drawing whose time is before the first loaded bar would be pinned to
+  // that bar instead, so signals from further back pile up there. They're
+  // left out until the user scrolls back and those bars load.
+  loaded(time) { return this.tvTime(time) >= this.loadedFrom; }
+
+  // The time of the oldest bar the chart holds. It keeps fewer bars than
+  // getBars hands it (it trims to what it asked for), so ask the chart.
+  async firstLoadedBar() {
+    try {
+      const d = await this.chart.exportData({ includeTime: true, includeSeries: false, includedStudies: [] });
+      return d.data.length ? d.data[0][0] * 1000 : Infinity;
+    } catch (err) {
+      console.warn('Advanced Charts: exportData', err);
+      return this.bars.length ? this.bars[Math.max(0, this.bars.length - 300)].time : Infinity;
+    }
+  }
+
+  // Older history arrived (the user scrolled back): draw the signals and
+  // trades that fall in it.
+  async onHistoryLoaded() {
+    const gen = this.gen;
     await this.loading;
-    const want = new Map(signals.slice(-MAX_SIGNAL_SHAPES).map((s) => [`${s.type}:${s.index}:${s.kind}`, s]));
+    const t = await this.firstLoadedBar();
+    if (gen !== this.gen || !(t < this.loadedFrom)) return;
+    this.loadedFrom = t;
+    this.redraw();
+  }
+
+  redraw() {
+    this.setSignals(this.lastSignals);
+    if (this.lastPositions) this.setPositions(...this.lastPositions);
+  }
+
+  async setSignals(signals) {
+    this.lastSignals = signals;
+    await this.loading;
+    const want = new Map(signals.filter((s) => this.loaded(s.time)).slice(-MAX_SIGNAL_SHAPES)
+      .map((s) => [`${s.type}:${s.index}:${s.kind}`, s]));
     for (const [key, id] of this.signalShapes) {
       if (!want.has(key)) { this.removeEntity(id); this.signalShapes.delete(key); }
     }
@@ -319,6 +360,7 @@ export class AdvancedChart {
   }
 
   async setPositions(trades, lastTime, orders = []) {
+    this.lastPositions = [trades, lastTime, orders];
     await this.loading;
     this.watchDrags();
     const h = this.handlers;
@@ -342,7 +384,7 @@ export class AdvancedChart {
       // Green / red zones with the built-in long / short position tool.
       const endTime = t.status === 'open' ? lastTime : t.exitTime;
       const sig = `${t.status}:${t.sl}:${t.tp}:${endTime}`;
-      this.keepEntity(seen, `zone:${t.id}`, sig, () => this.chart.createMultipointShape(
+      if (this.loaded(t.entryTime)) this.keepEntity(seen, `zone:${t.id}`, sig, () => this.chart.createMultipointShape(
         [{ time: this.tvTime(t.entryTime) / 1000, price: t.entryPrice }, { time: this.tvTime(endTime) / 1000, price: t.entryPrice }],
         {
           shape: buy ? 'long_position' : 'short_position', ...LOCKED,
@@ -354,10 +396,10 @@ export class AdvancedChart {
         },
       ));
 
-      this.keepEntity(seen, `in:${t.id}`, '', () => this.arrow(t.entryTime, t.entryPrice, buy, `You: ${name}`, '#3b82f6'));
+      if (this.loaded(t.entryTime)) this.keepEntity(seen, `in:${t.id}`, '', () => this.arrow(t.entryTime, t.entryPrice, buy, `You: ${name}`, '#3b82f6'));
       if (t.status !== 'open') {
         const label = { tp: 'Target', sl: 'SL', manual: 'Closed', reversed: 'Reversed' }[t.status];
-        this.keepEntity(seen, `out:${t.id}`, '', () => this.arrow(t.exitTime, t.exitPrice, !buy,
+        if (this.loaded(t.exitTime)) this.keepEntity(seen, `out:${t.id}`, '', () => this.arrow(t.exitTime, t.exitPrice, !buy,
           `${label} ${t.r >= 0 ? '+' : ''}${t.r.toFixed(2)}R`, t.r > 0 ? '#22c55e' : '#ef4444'));
       }
     }

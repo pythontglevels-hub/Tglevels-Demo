@@ -163,3 +163,8 @@ kbd { background: var(--panel-2); border: 1px solid var(--line); border-radius: 
 .journal .cap { font-size: 11px; color: var(--muted); }
 .journal .note { font-size: 12px; line-height: 1.45; color: var(--muted); margin: 6px 0 0; }
 .chart-wrap.picking { cursor: crosshair; }
+
+/* TradingView attribution, required by the Advanced Charts licence. */
+.tv-attribution { margin: 4px 2px 0; text-align: right; font-size: 11.5px; line-height: 1.4; color: var(--muted); }
+.tv-attribution a { color: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+.tv-attribution a:hover, .tv-attribution a:focus-visible { color: var(--text); }
